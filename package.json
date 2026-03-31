@@ -1,0 +1,14 @@
+{
+  "name": "masterwatt-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server voor Masterwatt Warmtepomp Kennisbank",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "node-fetch": "^3.3.2"
+  }
+}
