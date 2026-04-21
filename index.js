@@ -3,52 +3,60 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import fetch from "node-fetch";
-import cors from "cors"; // STAP 1: Importeer CORS
+import cors from "cors";
 
 const WP_API_URL = "https://www.masterwatt.com/wp-json/wp/v2/epkb_post_type_1";
 const app = express();
 
-app.use(cors()); // STAP 2: Activeer CORS voor alle inkomende verzoeken
+app.use(cors());
 app.use(express.json());
 
-// Interne legenda voor jouw ogen in de logs
+// Bron-mapping voor UTM_SOURCE (altijd kleine letters)
 const SOURCE_MAP = {
-  "1": "ChatGPT_CustomGPT",
-  "2": "Google_Gemini",
-  "3": "Claude_Projects",
-  "4": "Website_WebMCP",
-  "5": "Internal_Testing"
+  "1": "chatgpt",
+  "2": "gemini",
+  "3": "claude",
+  "4": "webmcp",
+  "5": "internal-test"
 };
 
 const server = new Server({
   name: "mw-expert",
-  version: "1.3.1",
+  version: "1.4.0",
 }, {
   capabilities: { tools: {} },
 });
 
-// Logging functie voor Railway
-const logActivity = (ds_id, action, detail) => {
-  const sourceName = SOURCE_MAP[ds_id] || `Unknown_Source_${ds_id}`;
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] SRC: ${sourceName} | ACT: ${action} | DET: ${detail}`);
+// Helper functie om UTM links te genereren
+const getTrackedUrl = (originalUrl, ds_id) => {
+  const source = SOURCE_MAP[ds_id] || "onbekend";
+  const medium = "llm";
+  const campaign = "masterwatt-ai";
+  
+  // Controleer of er al een query parameter in de URL zit
+  const separator = originalUrl.includes('?') ? '&' : '?';
+  return `${originalUrl}${separator}utm_source=${source}&utm_medium=${medium}&utm_campaign=${campaign}`;
 };
 
-// --- Speciale route voor ChatGPT Actions (JSON i.p.v. SSE) ---
+// Logging functie voor Railway
+const logActivity = (ds_id, action, detail) => {
+  const sourceLabel = SOURCE_MAP[ds_id]?.toUpperCase() || `UNKNOWN_${ds_id}`;
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] SRC: ${sourceLabel} | ACT: ${action} | DET: ${detail}`);
+};
+
+// --- API Route voor ChatGPT Actions ---
 app.get("/api/search", async (req, res) => {
   const query = req.query.query;
   const ds = req.query.ds || '1'; 
   
   logActivity(ds, "API_SEARCH", query);
 
-  if (!query) {
-    return res.status(400).json({ error: "Geen zoekterm opgegeven." });
-  }
+  if (!query) return res.status(400).json({ error: "Geen zoekterm." });
 
   try {
-    // Voeg een timeout toe aan de fetch om 'hangen' te voorkomen
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000); // 8 seconden timeout
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
     const response = await fetch(`${WP_API_URL}?search=${encodeURIComponent(query)}`, {
       signal: controller.signal
@@ -62,23 +70,24 @@ app.get("/api/search", async (req, res) => {
     }
 
     const results = data.slice(0, 3).map(post => {
-      const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1200);
-      return `TITEL: ${post.title.rendered}\nURL: ${post.link}\nINHOUD: ${cleanContent}...`;
+      const trackedUrl = getTrackedUrl(post.link, ds);
+      const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1000);
+      return `TITEL: ${post.title.rendered}\nURL: ${trackedUrl}\nINHOUD: ${cleanContent}...`;
     }).join("\n\n");
 
     res.json({ results: results });
   } catch (error) {
-    console.error("API Error:", error);
-    res.status(500).json({ error: "De kennisbank reageert momenteel niet. Probeer het later opnieuw." });
+    res.status(500).json({ error: "Kennisbank onbereikbaar." });
   }
 });
 
+// --- MCP Protocol Handlers (voor Claude & WebMCP) ---
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
         name: "mw_search",
-        description: "Search the Masterwatt technical knowledge base for heat pump information.",
+        description: "Zoek in de Masterwatt technische kennisbank.",
         inputSchema: {
           type: "object",
           properties: { query: { type: "string" } },
@@ -94,7 +103,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const ds = app.get('current_ds') || '0';
 
   if (name === "mw_search") {
-    logActivity(ds, "SEARCH", args.query);
+    logActivity(ds, "MCP_SEARCH", args.query);
     const response = await fetch(`${WP_API_URL}?search=${encodeURIComponent(args.query)}`);
     const data = await response.json();
     
@@ -103,26 +112,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const results = data.slice(0, 3).map(post => {
-      const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1200);
-      return `TITEL: ${post.title.rendered}\nURL: ${post.link}\nINHOUD: ${cleanContent}...`;
+      const trackedUrl = getTrackedUrl(post.link, ds);
+      const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1000);
+      return `TITEL: ${post.title.rendered}\nURL: ${trackedUrl}\nINHOUD: ${cleanContent}...`;
     }).join("\n\n");
 
     return { content: [{ type: "text", text: results }] };
   }
 });
 
-let transport;
 app.get("/sse", async (req, res) => {
   const ds = req.query.ds || '0';
   app.set('current_ds', ds); 
-  
-  transport = new SSEServerTransport("/messages", res);
+  const transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
+  const transport = new SSEServerTransport("/messages", res); // Simplificatie voor demo
   if (transport) await transport.handlePostMessage(req, res);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Masterwatt Server draait op poort ${PORT}`));
+app.listen(PORT, () => console.log(`Masterwatt AI Server live op poort ${PORT}`));
