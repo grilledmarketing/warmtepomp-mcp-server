@@ -3,9 +3,13 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import fetch from "node-fetch";
+import cors from "cors"; // STAP 1: Importeer CORS
 
 const WP_API_URL = "https://www.masterwatt.com/wp-json/wp/v2/epkb_post_type_1";
 const app = express();
+
+app.use(cors()); // STAP 2: Activeer CORS voor alle inkomende verzoeken
+app.use(express.json());
 
 // Interne legenda voor jouw ogen in de logs
 const SOURCE_MAP = {
@@ -30,15 +34,27 @@ const logActivity = (ds_id, action, detail) => {
   console.log(`[${timestamp}] SRC: ${sourceName} | ACT: ${action} | DET: ${detail}`);
 };
 
-// --- NIEUW: Speciale route voor ChatGPT Actions (JSON i.p.v. SSE) ---
+// --- Speciale route voor ChatGPT Actions (JSON i.p.v. SSE) ---
 app.get("/api/search", async (req, res) => {
   const query = req.query.query;
-  const ds = req.query.ds || '1'; // Default naar ChatGPT bron-id
+  const ds = req.query.ds || '1'; 
   
   logActivity(ds, "API_SEARCH", query);
 
+  if (!query) {
+    return res.status(400).json({ error: "Geen zoekterm opgegeven." });
+  }
+
   try {
-    const response = await fetch(`${WP_API_URL}?search=${encodeURIComponent(query)}`);
+    // Voeg een timeout toe aan de fetch om 'hangen' te voorkomen
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8 seconden timeout
+
+    const response = await fetch(`${WP_API_URL}?search=${encodeURIComponent(query)}`, {
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeout);
     const data = await response.json();
     
     if (!data || data.length === 0) {
@@ -46,19 +62,16 @@ app.get("/api/search", async (req, res) => {
     }
 
     const results = data.slice(0, 3).map(post => {
-      // Verwijder HTML tags en beperk de lengte voor de AI
       const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1200);
       return `TITEL: ${post.title.rendered}\nURL: ${post.link}\nINHOUD: ${cleanContent}...`;
     }).join("\n\n");
 
-    // ChatGPT verwacht een JSON object met de resultaten string
     res.json({ results: results });
   } catch (error) {
     console.error("API Error:", error);
-    res.status(500).json({ error: "Fout bij ophalen data uit de kennisbank." });
+    res.status(500).json({ error: "De kennisbank reageert momenteel niet. Probeer het later opnieuw." });
   }
 });
-// ------------------------------------------------------------------
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -86,7 +99,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const data = await response.json();
     
     if (!data || data.length === 0) {
-      return { content: [{ type: "text", text: "Geen resultaten gevonden in de Masterwatt kennisbank." }] };
+      return { content: [{ type: "text", text: "Geen resultaten gevonden." }] };
     }
 
     const results = data.slice(0, 3).map(post => {
@@ -112,4 +125,4 @@ app.post("/messages", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Masterwatt Analytics Server draait op poort ${PORT}`));
+app.listen(PORT, () => console.log(`Masterwatt Server draait op poort ${PORT}`));
