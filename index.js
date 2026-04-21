@@ -11,8 +11,9 @@ const app = express();
 const SOURCE_MAP = {
   "1": "ChatGPT_CustomGPT",
   "2": "Google_Gemini",
-  "3": "Website_WebMCP",
-  "4": "Internal_Testing"
+  "3": "Claude_Projects",
+  "4": "Website_WebMCP",
+  "5": "Internal_Testing"
 };
 
 const server = new Server({
@@ -28,6 +29,36 @@ const logActivity = (ds_id, action, detail) => {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] SRC: ${sourceName} | ACT: ${action} | DET: ${detail}`);
 };
+
+// --- NIEUW: Speciale route voor ChatGPT Actions (JSON i.p.v. SSE) ---
+app.get("/api/search", async (req, res) => {
+  const query = req.query.query;
+  const ds = req.query.ds || '1'; // Default naar ChatGPT bron-id
+  
+  logActivity(ds, "API_SEARCH", query);
+
+  try {
+    const response = await fetch(`${WP_API_URL}?search=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    
+    if (!data || data.length === 0) {
+      return res.json({ results: "Geen resultaten gevonden in de Masterwatt kennisbank." });
+    }
+
+    const results = data.slice(0, 3).map(post => {
+      // Verwijder HTML tags en beperk de lengte voor de AI
+      const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1200);
+      return `TITEL: ${post.title.rendered}\nURL: ${post.link}\nINHOUD: ${cleanContent}...`;
+    }).join("\n\n");
+
+    // ChatGPT verwacht een JSON object met de resultaten string
+    res.json({ results: results });
+  } catch (error) {
+    console.error("API Error:", error);
+    res.status(500).json({ error: "Fout bij ophalen data uit de kennisbank." });
+  }
+});
+// ------------------------------------------------------------------
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -59,7 +90,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const results = data.slice(0, 3).map(post => {
-      // Verwijder HTML tags en beperk de lengte voor de AI
       const cleanContent = post.content.rendered.replace(/<[^>]*>?/gm, '').substring(0, 1200);
       return `TITEL: ${post.title.rendered}\nURL: ${post.link}\nINHOUD: ${cleanContent}...`;
     }).join("\n\n");
@@ -71,7 +101,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 let transport;
 app.get("/sse", async (req, res) => {
   const ds = req.query.ds || '0';
-  app.set('current_ds', ds); // Sla de bron tijdelijk op voor de logger
+  app.set('current_ds', ds); 
   
   transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
